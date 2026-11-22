@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# 本地跑出来的产物
+simulated.csv
+answers.csv
+params.json
+mastery.csv
+pred.csv
+data/

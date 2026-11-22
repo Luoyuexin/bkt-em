@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bkt-em"
+version = "0.1.0"
+description = "Bayesian Knowledge Tracing (BKT) fitted by EM -- pure Python standard library, no numpy / pandas / scipy / sklearn"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Luoyuexin" }]
+keywords = [
+    "knowledge-tracing",
+    "bkt",
+    "bayesian-knowledge-tracing",
+    "em",
+    "expectation-maximization",
+    "education-data-mining",
+    "student-modeling",
+    "learning-analytics",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Education",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = []          # 测试只用 unittest，不需要额外依赖
+
+[project.scripts]
+bkt-em = "bkt_em.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Luoyuexin/bkt-em"
+Repository = "https://github.com/Luoyuexin/bkt-em"
+Issues = "https://github.com/Luoyuexin/bkt-em/issues"
+
+[tool.setuptools]
+packages = ["bkt_em"]
