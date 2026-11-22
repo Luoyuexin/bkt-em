@@ -48,7 +48,7 @@ scipy 1.18 的 minimize 返回形状变了                            → EM_fit
 
 ```bash
 pip install -e .          # 本仓库
-pip install bkt-em        # 发布到 PyPI 后
+pip install bkt-em        # 等待版本相对稳定 发布到 PyPI 后
 ```
 
 ### 三十秒跑通
