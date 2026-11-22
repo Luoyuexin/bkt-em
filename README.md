@@ -20,9 +20,9 @@
 
 ---
 
-## 为什么不用 pyBKT
+## 相比 pyBKT 的优势
 
-pyBKT 是好东西，但它拖着 numpy / pandas / scipy / sklearn 四条链。这四个包任意一个
+pyBKT 拖着 numpy / pandas / scipy / sklearn 四条链。这四个包任意一个
 换了接口，pyBKT 就崩，而且崩的位置一次比一次深。实测在
 Python 3.14 + numpy 2.5 + pandas 3.0 + scipy 1.18 + sklearn 1.9 上暴露了三处不兼容：
 
@@ -190,7 +190,7 @@ K2     0.1934  0.0890  0.2688  0.2354
 5 折交叉验证（按学生分折，预测的都是没见过的学生）：AUC 0.7203 | 准确率 0.6917 | logLoss 0.5537
 ```
 
-（这份样例数据是按 `L0=0.30, S=0.10, G=0.22, T=0.20` 生成的 —— 30 人有点少，
+（这份样例数据是按 `L0=0.30, S=0.10, G=0.22, T=0.20` 生成的 —— 30 人偏少，
 `K1` 的 `L0` 估到 0.36 就属于小样本的正常抖动。样本到了几千条会稳得多。）
 
 `--mastery` 输出的 CSV 就是知识追踪的最终产物：
@@ -323,4 +323,4 @@ Corbett, A. T., & Anderson, J. R. (1995). Knowledge tracing: Modeling the acquis
 procedural knowledge. *User Modeling and User-Adapted Interaction*, 4(4), 253–278.
 
 Beck, J. E., & Chang, K. (2007). Identifiability: A fundamental problem of student
-modeling. *UM 2007*.（讲的就是「数据不够时参数估不准」这件事）
+modeling. *UM 2007*.（解决「数据不够时参数估不准」）
