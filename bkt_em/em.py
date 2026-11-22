@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import random
+import warnings
 from dataclasses import dataclass, replace
 from typing import Any, Iterable, Iterator, Sequence as TSequence
 
@@ -28,6 +29,25 @@ from .data import Sequence
 
 _EPS = 1e-12
 _NEG_INF = float("-inf")
+
+# 题目难度怎么进模型：不是在外层乘一个权重，而是直接改发射概率
+#   S_eff = S × s_scale      难题更容易「会了却答错」
+#   G_eff = G × g_scale      难题更难「不会却蒙对」
+# 三档系数与教学侧的常识一致：基础题蒙对率高、失误率低；难题反过来。
+# 这套数值和项目里 knowledge.py 的 DIFFICULTY_S / DIFFICULTY_G 完全一致，
+# 两边算出来的掌握度才能对得上。
+DIFFICULTY_SCALE: dict[str, tuple[float, float]] = {
+    "basic": (0.90, 1.20),
+    "easy": (0.90, 1.20),
+    "简单": (0.90, 1.20),
+    "medium": (1.05, 0.95),
+    "normal": (1.05, 0.95),
+    "中等": (1.05, 0.95),
+    "hard": (1.25, 0.65),
+    "困难": (1.25, 0.65),
+    "难": (1.25, 0.65),
+}
+_DEFAULT_SCALE = (1.0, 1.0)
 
 
 @dataclass(frozen=True)
@@ -50,13 +70,39 @@ class Params:
     def as_dict(self) -> dict[str, float]:
         return {"L0": self.L0, "S": self.S, "G": self.G, "T": self.T, "F": self.F}
 
-    def emission(self) -> tuple[float, float]:
-        """(P(答对|未掌握), P(答对|已掌握)) = (G, 1-S)"""
-        return (self.G, 1.0 - self.S)
+    def emission(self, difficulty: str | None = None) -> tuple[float, float]:
+        """(P(答对|未掌握), P(答对|已掌握))，可选按难度打折。
 
-    def transition(self) -> tuple[tuple[float, float], tuple[float, float]]:
-        """A[j][k] = P(k_t = k | k_{t-1} = j)"""
-        return ((1.0 - self.T, self.T), (self.F, 1.0 - self.F))
+        难度直接改两端概率，不改变点估计的语义：S/G 估的是「medium 基准题」
+        上的失误率与猜测率，难度系数是一层乘法偏移。
+        """
+        s_scale, g_scale = DIFFICULTY_SCALE.get(
+            (difficulty or "").strip().lower(), _DEFAULT_SCALE
+        )
+        return (
+            min(1.0 - _EPS, max(_EPS, self.G * g_scale)),
+            min(1.0 - _EPS, max(_EPS, 1.0 - self.S * s_scale)),
+        )
+
+    def transition(self, dt_days: float = 0.0,
+                   lam: float = 0.0) -> tuple[tuple[float, float], tuple[float, float]]:
+        """A[j][k] = P(k_t = k | k_{t-1} = j)。
+
+        把两种遗忘并进同一个式子：
+
+            P(k_t=1 | k_{t-1}=1) = (1 - F) · exp(-λΔt)
+
+        · λ=0 时退化为 1-F，就是标准 BKT（不遗忘）。
+        · F=0 时只剩时间衰减，纯「隔久了会忘」。
+        · 两个都开也行：练一次也可能忘，再加上时间越久忘得越多。
+        · T（学会）不受影响 —— 做题才学得会，时间流逝不会让人突然学会。
+        """
+        keep = 1.0
+        if lam > 0.0 and dt_days > 0.0:
+            keep = math.exp(-lam * dt_days)
+        keep *= 1.0 - self.F
+        keep = min(1.0 - _EPS, max(_EPS, keep))
+        return ((1.0 - self.T, self.T), (1.0 - keep, keep))
 
     def clamped(self, lo: float, hi: float, forget: bool = True) -> "Params":
         def cut(v: float, low: float = lo) -> float:
@@ -74,20 +120,61 @@ class Params:
 # ---------------------------------------------------------------- E 步
 
 
-def _scan(y: TSequence[int], p: Params) -> dict[str, float] | None:
+def _scale_vectors(difficulty: TSequence[str] | None,
+                   n: int) -> tuple[list[float], list[float]]:
+    """把难度标签翻译成两条与题等长的向量：(S 系数, G 系数)。"""
+    if not difficulty or len(difficulty) != n:
+        return [1.0] * n, [1.0] * n
+    s_scale: list[float] = []
+    g_scale: list[float] = []
+    for label in difficulty:
+        s_k, g_k = DIFFICULTY_SCALE.get((label or "").strip().lower(), _DEFAULT_SCALE)
+        s_scale.append(s_k)
+        g_scale.append(g_k)
+    return s_scale, g_scale
+
+
+def _gap_vector(times: TSequence[float] | None, n: int) -> list[float]:
+    """相邻两题的间隔（天）：gaps[t] 是从 t-1 到 t 的间隔，gaps[0] 恒为 0。"""
+    if not times or len(times) != n:
+        return [0.0] * n
+    gaps = [0.0] * n
+    for t in range(1, n):
+        gaps[t] = max(0.0, times[t] - times[t - 1])
+    return gaps
+
+
+def _scan(y: TSequence[int], p: Params, lam: float = 0.0,
+          difficulty: TSequence[str] | None = None,
+          times: TSequence[float] | None = None) -> dict[str, float] | None:
     """单条序列的前向-后向，返回 M 步要用的充分统计量。
 
     返回 None 表示这条序列在当前参数下概率全为 0（参数跑到边界上去了），
     上层跳过它即可。
+
+    与标准 BKT 的两处差别，都体现在这里的「按题取参数」：
+      · 难度 → 每道题有自己的发射概率
+      · 时间 → 每道题有自己的转移矩阵（间隔越久越容易忘）
     """
     n = len(y)
     if n == 0:
         return None
 
-    A = p.transition()
-    e = p.emission()
+    s_scale, g_scale = _scale_vectors(difficulty, n)
+    gaps = _gap_vector(times, n)
+    # trans[t] 是「从 t-1 走到 t」的矩阵；trans[0] 用不到
+    # 没有时间列时所有转移矩阵都相同，算一次就够 —— 老用法能省一大截开销
+    if times and len(times) == n:
+        trans = [p.transition(gaps[t], lam) for t in range(n)]
+    else:
+        trans = [p.transition(0.0, lam)] * n
+    if difficulty and len(difficulty) == n:
+        emis = [p.emission(difficulty[t]) for t in range(n)]
+    else:
+        emis = [p.emission(None)] * n
 
     def like(t: int, k: int) -> float:
+        e = emis[t]
         return e[k] if y[t] else 1.0 - e[k]
 
     # ---- 前向（带缩放）
@@ -105,6 +192,7 @@ def _scan(y: TSequence[int], p: Params) -> dict[str, float] | None:
 
     for t in range(1, n):
         prev = alpha[t - 1]
+        A = trans[t]
         for k in (0, 1):
             alpha[t][k] = (prev[0] * A[0][k] + prev[1] * A[1][k]) * like(t, k)
         ct = alpha[t][0] + alpha[t][1]
@@ -118,6 +206,7 @@ def _scan(y: TSequence[int], p: Params) -> dict[str, float] | None:
     # ---- 后向（同样带缩放，除 c_{t+1}）
     beta: list[list[float]] = [[1.0, 1.0] for _ in range(n)]
     for t in range(n - 2, -1, -1):
+        A = trans[t + 1]
         for j in (0, 1):
             beta[t][j] = (
                 A[j][0] * like(t + 1, 0) * beta[t + 1][0]
@@ -146,8 +235,10 @@ def _scan(y: TSequence[int], p: Params) -> dict[str, float] | None:
 
         if t == 0:
             stats["l0_num"] = g1
-        stats["s_den"] += g1
-        stats["g_den"] += g0
+        # 分母带上难度系数：估的是「基准题」上的 S/G，难度只是乘法偏移。
+        # 系数全为 1 时这里就退化成标准写法 Σγ，不改变原有行为。
+        stats["s_den"] += g1 * s_scale[t]
+        stats["g_den"] += g0 * g_scale[t]
         if y[t]:
             stats["g_num"] += g0        # 不会却蒙对
         else:
@@ -155,6 +246,7 @@ def _scan(y: TSequence[int], p: Params) -> dict[str, float] | None:
 
         if t < n - 1:
             # xi 与 gamma 用同一个 z 归一，保证 Σ_k xi(j,k) == gamma(j)
+            A = trans[t + 1]
             xi01 = alpha[t][0] * A[0][1] * like(t + 1, 1) * beta[t + 1][1] / c[t + 1] / z
             xi10 = alpha[t][1] * A[1][0] * like(t + 1, 0) * beta[t + 1][0] / c[t + 1] / z
             stats["t_num"] += xi01      # 不会 → 会
@@ -165,12 +257,13 @@ def _scan(y: TSequence[int], p: Params) -> dict[str, float] | None:
     return stats
 
 
-def _accumulate(seqs: Iterable[Sequence], p: Params) -> dict[str, float] | None:
+def _accumulate(seqs: Iterable[Sequence], p: Params,
+                lam: float = 0.0) -> dict[str, float] | None:
     """把一组的统计量加起来。``_nseq`` 是成功参与计算的序列条数 —— L0 的分母。"""
     total: dict[str, float] | None = None
     nseq = 0.0
     for s in seqs:
-        one = _scan(s.y, p)
+        one = _scan(s.y, p, lam, s.difficulty, s.time)
         if one is None:
             continue
         nseq += 1.0
@@ -222,8 +315,16 @@ def _random_params(rng: random.Random, forget: bool) -> Params:
 
 def _fit_group(seqs: list[Sequence], init: Params, *, forget: bool, tol: float,
                max_iter: int, n_init: int, rng: random.Random,
-               bounds: tuple[float, float]) -> tuple[Params, float, int]:
-    """对一组序列跑 EM，多个起点取最优。返回 (参数, 对数似然, 迭代次数)。"""
+               bounds: tuple[float, float],
+               lam: float = 0.0, guard: bool = False) -> tuple[Params, float, int]:
+    """对一组序列跑 EM，多个起点取最优。返回 (参数, 对数似然, 迭代次数)。
+
+    ``guard`` 是给难度/时间这类「非标准 BKT」准备的：
+    有难度系数时，S/G 的 M 步闭式解只是一阶近似（因为 1-S·s_t 没法直接解析），
+    每轮可能让似然掉 1e-5 量级。开启守护后，一旦更新让似然下降就回退并收敛，
+    保证对外表现仍是「迭代过程似然单调不降」。
+    标准 BKT（无难度、无时间）不需要它，所以默认关闭、零开销。
+    """
     starts = [init]
     for _ in range(max(0, n_init - 1)):
         starts.append(_random_params(rng, forget))
@@ -233,18 +334,26 @@ def _fit_group(seqs: list[Sequence], init: Params, *, forget: bool, tol: float,
         p = start
         prev_ll = _NEG_INF
         used = 0
+        pending: dict[str, float] | None = None   # 上一轮 guard 已经算过的 stats
         for it in range(1, max_iter + 1):
             used = it
-            stats = _accumulate(seqs, p)
+            stats = pending if pending is not None else _accumulate(seqs, p, lam)
+            pending = None
             if stats is None:
                 break
             ll = stats["ll"]
-            p = _m_step(stats, p, forget, bounds)
+            cand = _m_step(stats, p, forget, bounds)
+            if guard:
+                probe = _accumulate(seqs, cand, lam)
+                if probe is None or probe["ll"] < ll - 1e-12:
+                    break           # 不再上升，就地收敛（p 保持当前值）
+                pending = probe     # 下一轮直接用，别重算 —— 否则开销翻倍
+            p = cand
             if abs(ll - prev_ll) < tol:
                 break
             prev_ll = ll
         # M 步之后参数变了，重新算一次真实的似然用于比较
-        stats = _accumulate(seqs, p)
+        stats = _accumulate(seqs, p, lam)
         ll_final = stats["ll"] if stats is not None else _NEG_INF
         if best is None or ll_final > best[1]:
             best = (p, ll_final, used)
@@ -256,23 +365,28 @@ def _fit_group(seqs: list[Sequence], init: Params, *, forget: bool, tol: float,
 # ---------------------------------------------------------------- 预测
 
 
-def _filter(y: TSequence[int], p: Params) -> tuple[list[float], list[float]]:
+def _filter(y: TSequence[int], p: Params, lam: float = 0.0,
+            difficulty: TSequence[str] | None = None,
+            times: TSequence[float] | None = None) -> tuple[list[float], list[float]]:
     """逐题的**事前**预测概率 + 全部作答完后的掌握后验。
 
     注意这里是「事前」：预测第 t 题时只用到 y_1..y_{t-1}，
     不然拿答案算出来的预测等于作弊，评估出来的 AUC 会虚高。
     """
-    A = p.transition()
-    e = p.emission()
+    n = len(y)
+    gaps = _gap_vector(times, n)
+    has_diff = bool(difficulty) and len(difficulty) == n
     post = [1.0 - p.L0, p.L0]
     out: list[float] = []
-    for t in range(len(y)):
+    for t in range(n):
         if t:
+            A = p.transition(gaps[t], lam)
             post = [
                 post[0] * A[0][0] + post[1] * A[1][0],
                 post[0] * A[0][1] + post[1] * A[1][1],
             ]
-        out.append(post[0] * e[0] + post[1] * e[1])
+        e = p.emission(difficulty[t] if has_diff else None)
+        out.append(min(1.0 - _EPS, max(_EPS, post[0] * e[0] + post[1] * e[1])))
 
         yt = y[t]
         n0 = post[0] * (e[0] if yt else 1.0 - e[0])
@@ -324,27 +438,34 @@ class BKTModel:
 
     参数
     ----
-    model     "global"（全班一套） / "per-skill"（每个知识点一套） /
-              "per-user"（每个学生一套，样本少的自动退回 per-skill）
-    forget    是否估遗忘率 F。默认 False。
-    n_init    EM 随机起点个数，默认 3。设 1 就只从 initial 那组跑。
-    min_obs   per-user 模式下，样本量低于此值的学生不单独建模（默认 30）。
-    seed      随机种子，保证同一份数据跑两次结果一样。
-    bounds    参数裁剪区间，默认 (1e-3, 1 - 1e-3)。不裁剪容易出现
-              S=0 或 G=1 这种「完美观测」的退化解。
+    model         "global"（全班一套） / "per-skill"（每个知识点一套） /
+                  "per-user"（每个学生一套，样本少的自动退回 per-skill）
+    forget        是否估遗忘率 F。默认 False。
+    decay_lambda  时间衰减系数 λ（单位 1/天）。默认 0 表示不看时间。
+                  开了之后 P(k_t=1|k_{t-1}=1) = (1-F)·exp(-λΔt)，
+                  也就是「隔得越久越可能忘」。需要序列里带时间列。
+    n_init        EM 随机起点个数，默认 3。设 1 就只从 initial 那组跑。
+    min_obs       per-user 模式下，样本量低于此值的学生不单独建模（默认 30）。
+    seed          随机种子，保证同一份数据跑两次结果一样。
+    bounds        参数裁剪区间，默认 (1e-3, 1 - 1e-3)。不裁剪容易出现
+                  S=0 或 G=1 这种「完美观测」的退化解。
     """
 
     _MODELS = ("global", "per-skill", "per-user")
 
     def __init__(self, model: str = "per-skill", *, forget: bool = False,
+                 decay_lambda: float = 0.0,
                  initial: Params | dict[str, float] | None = None,
                  tol: float = 1e-6, max_iter: int = 200, n_init: int = 3,
                  min_obs: int = 30, seed: int = 42,
                  bounds: tuple[float, float] = (1e-3, 1.0 - 1e-3)) -> None:
         if model not in self._MODELS:
             raise ValueError(f"model 只能是 {self._MODELS}，收到的是 {model!r}")
+        if decay_lambda < 0:
+            raise ValueError("decay_lambda 不能为负")
         self.model = model
         self.forget = forget
+        self.decay_lambda = float(decay_lambda)
         self.tol = tol
         self.max_iter = max_iter
         self.n_init = n_init
@@ -395,9 +516,19 @@ class BKTModel:
         if not seqs:
             raise ValueError("没有序列可拟合：检查 to_sequences 的列名识别是否正常")
 
+        if self.decay_lambda > 0 and not any(s.time for s in seqs):
+            warnings.warn(
+                "开了 decay_lambda 但序列里没有时间列，时间衰减不会生效。"
+                "用 to_sequences(time_col=...) 或 load_csv(time_col=...) 带上时间。",
+                stacklevel=2,
+            )
+
         rng = random.Random(self.seed)
+        # 只有「难度」或「时间」在场时才需要似然守护，标准 BKT 走原来的快路径
+        guard = any(bool(s.difficulty) or bool(s.time) for s in seqs)
         kw = dict(forget=self.forget, tol=self.tol, max_iter=self.max_iter,
-                  n_init=self.n_init, rng=rng, bounds=self.bounds)
+                  n_init=self.n_init, rng=rng, bounds=self.bounds,
+                  lam=self.decay_lambda, guard=guard)
 
         self._pooled, _ll, iters = _fit_group(seqs, self.initial, **kw)
         self._per_skill, self._per_user = {}, {}
@@ -432,7 +563,7 @@ class BKTModel:
         used: dict[int, Params] = {}
         for s in sequences:
             p = self._params_for(s)
-            stats = _scan(s.y, p)
+            stats = _scan(s.y, p, self.decay_lambda, s.difficulty, s.time)
             if stats is None:
                 continue
             total += stats["ll"]
@@ -456,7 +587,7 @@ class BKTModel:
         self._check_fitted()
         out: list[float] = []
         for s in sequences:
-            probs, _ = _filter(s.y, self._params_for(s))
+            probs, _ = _filter(s.y, self._params_for(s), self.decay_lambda, s.difficulty, s.time)
             out.extend(probs)
         return out
 
@@ -465,7 +596,7 @@ class BKTModel:
         self._check_fitted()
         out: dict[int, float] = {}
         for s in sequences:
-            probs, _ = _filter(s.y, self._params_for(s))
+            probs, _ = _filter(s.y, self._params_for(s), self.decay_lambda, s.difficulty, s.time)
             for row, prob in zip(s.rows, probs):
                 out[row] = prob
         return out
@@ -479,7 +610,7 @@ class BKTModel:
         self._check_fitted()
         out: dict[str, float] = {}
         for s in sequences:
-            _, post = _filter(s.y, self._params_for(s))
+            _, post = _filter(s.y, self._params_for(s), self.decay_lambda, s.difficulty, s.time)
             out[f"{s.user}/{s.skill}"] = post[1]
         return out
 
@@ -489,7 +620,7 @@ class BKTModel:
         y_true: list[int] = []
         y_pred: list[float] = []
         for s in sequences:
-            probs, _ = _filter(s.y, self._params_for(s))
+            probs, _ = _filter(s.y, self._params_for(s), self.decay_lambda, s.difficulty, s.time)
             y_true.extend(s.y)
             y_pred.extend(probs)
         if not y_true:
@@ -525,6 +656,7 @@ class BKTModel:
         return {
             "model": self.model,
             "forget": self.forget,
+            "decayLambda": self.decay_lambda,
             "groups": len(self.params()),
             "nParams": self.n_params_,
             "iterations": self.iterations_,

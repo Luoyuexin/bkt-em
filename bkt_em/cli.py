@@ -67,23 +67,37 @@ def _print_summary(seqs: TSequence[Sequence]) -> None:
 def _cmd_fit(args: argparse.Namespace) -> int:
     if args.simulate:
         truth = _truth_params(args)
+        cycle = [d.strip() for d in (args.difficulty_cycle or "").split(",") if d.strip()]
         seqs = simulate(n_users=args.users, n_skills=args.skills, n_items=args.items,
-                        params=truth, seed=args.seed)
+                        params=truth, seed=args.seed,
+                        difficulty_cycle=cycle or None, gap_days=args.gap_days,
+                        decay_lambda=args.decay)
         print(f"[模拟数据] {args.users} 人 × {args.skills} 知识点 × {args.items} 题")
         if truth is not None:
             print(f"[真值] {truth.as_dict()}")
+        if cycle:
+            print(f"[难度循环] {' → '.join(cycle)}")
+        if args.gap_days > 0:
+            print(f"[时间] 平均间隔 {args.gap_days:g} 天，λ={args.decay:g}")
     else:
         if not args.input:
             print("要么给一个 CSV 路径，要么加 --simulate 用模拟数据。", file=sys.stderr)
             return 2
         seqs = load_csv(args.input, user_col=args.user_col, skill_col=args.skill_col,
                         correct_col=args.correct_col, order_col=args.order_col,
-                        min_length=args.min_length)
+                        difficulty_col=args.difficulty_col, time_col=args.time_col,
+                        time_unit=args.time_unit, min_length=args.min_length)
 
     _print_summary(seqs)
+    has_diff = sum(1 for s in seqs if s.difficulty)
+    has_time = sum(1 for s in seqs if s.time)
+    if has_diff or has_time:
+        print(f"其中带难度 {has_diff} 条、带时间 {has_time} 条", end="")
+        print(f"（时间单位已换算成天）" if has_time else "")
     print()
 
-    model = BKTModel(model=args.model, forget=args.forget, n_init=args.n_init,
+    model = BKTModel(model=args.model, forget=args.forget,
+                     decay_lambda=args.decay, n_init=args.n_init,
                      min_obs=args.min_obs, seed=args.seed).fit(seqs)
 
     head = ["group", "L0", "S", "G", "T"] + (["F"] if args.forget else [])
@@ -94,15 +108,18 @@ def _cmd_fit(args: argparse.Namespace) -> int:
 
     print()
     rep = model.report(seqs)
+    lam_note = f" | 时间衰减 λ={args.decay:g}/天" if args.decay > 0 else ""
     print(f"对数似然 {rep['logLikelihood']:.1f} | 参数 {rep['nParams']} 个 | "
-          f"AIC {rep['aic']:.1f} | BIC {rep['bic']:.1f} | EM 迭代 {rep['iterations']}")
+          f"AIC {rep['aic']:.1f} | BIC {rep['bic']:.1f} | EM 迭代 {rep['iterations']}"
+          f"{lam_note}")
     print(f"训练集 AUC {_fmt(rep['auc'])} | 准确率 {_fmt(rep['accuracy'])} | "
           f"logLoss {_fmt(rep['logLoss'])}")
 
     if args.cv:
         print()
         cv = cross_validate(seqs, k=args.cv, model=args.model, forget=args.forget,
-                            n_init=args.n_init, min_obs=args.min_obs, seed=args.seed)
+                            decay_lambda=args.decay, n_init=args.n_init,
+                            min_obs=args.min_obs, seed=args.seed)
         print(f"{cv['k']} 折交叉验证（按学生分折，预测的都是没见过的学生）："
               f"AUC {_fmt(cv['auc'])} | 准确率 {_fmt(cv['accuracy'])} | "
               f"logLoss {_fmt(cv['logLoss'])}")
@@ -111,7 +128,8 @@ def _cmd_fit(args: argparse.Namespace) -> int:
         print()
         print("三种参数化对比（cvAuc 才是真本事，AIC/BIC 只看训练集）：")
         cmp = compare_models(seqs, k=args.cv or 3, n_init=args.n_init,
-                             min_obs=args.min_obs, seed=args.seed)
+                             min_obs=args.min_obs, decay_lambda=args.decay,
+                             seed=args.seed)
         print(_table(
             ["model", "nParams", "logLik", "AIC", "cvAuc", "cvLogLoss"],
             [[name, row["nParams"], row["logLikelihood"], row["aic"],
@@ -158,19 +176,40 @@ def _cmd_fit(args: argparse.Namespace) -> int:
 
 def _cmd_simulate(args: argparse.Namespace) -> int:
     truth = _truth_params(args)
+    cycle = [d.strip() for d in (args.difficulty_cycle or "").split(",") if d.strip()]
     seqs = simulate(n_users=args.users, n_skills=args.skills, n_items=args.items,
-                    params=truth, seed=args.seed, ability_sd=args.ability_sd)
+                    params=truth, seed=args.seed, ability_sd=args.ability_sd,
+                    difficulty_cycle=cycle or None, gap_days=args.gap_days,
+                    decay_lambda=args.decay)
     rows = []
+    header = ["user_id", "skill_name", "correct", "order_id"]
+    if cycle:
+        header.append("difficulty")
+    if args.gap_days > 0:
+        header.append("answered_at")
     for s in seqs:
         for order, y in enumerate(s.y):
-            rows.append([s.user, s.skill, y, order])
+            line = [s.user, s.skill, y, order]
+            if cycle:
+                line.append(s.difficulty[order])
+            if args.gap_days > 0:
+                line.append(round(s.time[order], 4))
+            rows.append(line)
     path = args.out or "simulated.csv"
     with open(path, "w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["user_id", "skill_name", "correct", "order_id"])
+        writer.writerow(header)
         writer.writerows(rows)
     print(f"已生成 {path}：{len(rows)} 行，{len(seqs)} 条序列")
-    print(f"再用它反推参数：python -m bkt_em fit {path} --model per-skill")
+    if cycle:
+        print(f"难度循环：{' → '.join(cycle)}")
+    if args.gap_days > 0:
+        print(f"时间列 answered_at 单位是天，平均间隔约 {args.gap_days:g} 天"
+              + (f"，生成时 λ={args.decay:g}" if args.decay > 0 else ""))
+    hint = f"python -m bkt_em fit {path} --model per-skill"
+    if args.gap_days > 0 and args.decay > 0:
+        hint += f" --time-col answered_at --decay {args.decay:g}"
+    print(f"再用它反推参数：{hint}")
     return 0
 
 
@@ -213,9 +252,22 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--skill-col", dest="skill_col")
     fit.add_argument("--correct-col", dest="correct_col")
     fit.add_argument("--order-col", dest="order_col")
+    fit.add_argument("--difficulty-col", dest="difficulty_col",
+                     help="难度列（basic / medium / hard，认不出的当不调整）")
+    fit.add_argument("--time-col", dest="time_col",
+                     help="作答时间列，配合 --decay 做时间衰减")
+    fit.add_argument("--time-unit", dest="time_unit", default="day",
+                     choices=["day", "hour", "minute", "second", "ms"],
+                     help="时间列的单位，默认 day")
+    fit.add_argument("--decay", type=float, default=0.0,
+                     help="时间衰减系数 λ（1/天），0 表示不看时间")
     fit.add_argument("--out", help="参数写入 JSON")
     fit.add_argument("--mastery", help="每个学生每个知识点的掌握度写入 CSV")
     fit.add_argument("--predict", help="逐题预测概率写入 CSV")
+    fit.add_argument("--difficulty-cycle", dest="difficulty_cycle",
+                     help="仅配合 --simulate：难度循环，如 basic,medium,hard")
+    fit.add_argument("--gap-days", dest="gap_days", type=float, default=0.0,
+                     help="仅配合 --simulate：两题之间隔几天，>0 才带时间")
     _add_truth_args(fit)
     fit.set_defaults(func=_cmd_fit)
 
@@ -227,6 +279,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="学生之间初始水平的差异")
     sim.add_argument("--seed", type=int, default=0)
     sim.add_argument("--out", help="输出 CSV 路径")
+    sim.add_argument("--difficulty-cycle", dest="difficulty_cycle",
+                     help="难度循环，如 basic,medium,hard（会多出一列 difficulty）")
+    sim.add_argument("--gap-days", dest="gap_days", type=float, default=0.0,
+                     help="两题之间隔几天，>0 会多出一列 answered_at（单位天）")
+    sim.add_argument("--decay", type=float, default=0.0,
+                     help="生成时的真实时间衰减 λ（1/天），需配合 --gap-days")
     _add_truth_args(sim)
     sim.set_defaults(func=_cmd_simulate)
 

@@ -3,7 +3,7 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-48%20passed-2ea44f)](tests)
+[![Tests](https://img.shields.io/badge/tests-70%20passed-2ea44f)](tests)
 
 **贝叶斯知识追踪（BKT）的 EM 实现，纯 Python 标准库，零第三方依赖。**
 
@@ -101,12 +101,17 @@ seqs = load_csv("answers.csv")            # 列名自动识别，见下文「数
 | 知识点 | `skill_name` `skill` `kc` `knowledge` `knowledge_id` `kcs` |
 | 对错 | `correct` `is_correct` `y` `label` `score` `outcome` |
 | 顺序 | `order_id` `order` `step` `attempt` `seq` `timestamp` `time` |
+| 难度（可选） | `difficulty` `diff` `level` `difficulty_level` `难度` |
+| 时间（可选） | `answered_at` `created_at` `submit_time` `datetime` `答题时间` |
+
+> 注意 `timestamp` / `time` 归**顺序**列（那是题序，BKT 对顺序敏感），
+> 时间衰减只用「时间」那一行的列名。两者别混。
 
 ```csv
-user_id,skill_name,correct,order_id
-s01,K1,1,1
-s01,K1,0,2
-s01,K2,1,1
+user_id,skill_name,correct,order_id,difficulty,answered_at
+s01,K1,1,1,hard,0
+s01,K1,0,2,hard,3.5
+s01,K2,1,1,basic,0
 ```
 
 对错列认 `1/0`、`true/false`、`t/f`、`对/错`；认不出来的行会被丢掉（不猜）。
@@ -125,6 +130,64 @@ s01,K2,1,1
 | `per-user` | 每个学生一套 | 4 × 达标学生数 | 想做个性化，且每个学生有 ≥30 条作答 |
 
 `per-user` 里样本不够的学生会自动退回 `per-skill`，不会用一个学生的三条规定拟合四个参数。
+
+---
+
+## 题目难度与时间间隔
+
+标准 BKT 有两个隐含假设：**所有题一样难**、**两道题之间没有时间流逝**。真实数据里这两条都不成立。
+
+0.2.0 起这两件事都能进模型，而且**开关是完全被动的**——数据里带了就生效，没带就一点都不影响原有行为（0.1.0 的结果逐位相同）。
+
+### 难度：只知道标签，不改模型结构
+
+给一列难度，模型按标签调整这道题的发射概率：
+
+| 标签 | 失误率 S 系数 | 猜测率 G 系数 | 直觉 |
+| --- | --- | --- | --- |
+| `basic` / `easy` / `简单` | ×0.90 | ×1.20 | 基础题：不容易失误，但更容易蒙对 |
+| `medium` / `normal` / `中等` | ×1.05 | ×0.95 | 基准 |
+| `hard` / `困难` / `难` | ×1.25 | ×0.65 | 难题：容易失误，几乎蒙不对 |
+
+认不出来的标签按「不调整」处理，不报错——不知道的事不该假装知道。
+
+**这是已知输入，不是从数据估的。** 想「从作答反推每道题的难度」，那是 IRT 的活，不在这个包里。
+
+实测收益（300 人 × 12 题，basic / hard 交替）：
+
+| | AUC | logLoss | 对数似然 |
+| --- | --- | --- | --- |
+| 带难度 | **0.7943** | **0.4738** | -1705.9 |
+| 忽略难度 | 0.7855 | 0.4772 | -1717.9 |
+
+增益是真的，但不夸张——难度系数是已知的乘性偏移，它改变的是「不同题目证据的权重」，不会凭空变出信息。
+
+### 时间：隔得越久，越可能忘
+
+给一列时间，相邻两题的间隔 Δt 会进入转移概率：
+
+$$P(k_t=1 \mid k_{t-1}=1) = (1-F) \cdot e^{-\lambda \Delta t}$$
+
+打开只有一个参数 `decay_lambda`（单位 **1/天**）：
+
+| 设置 | 效果 |
+| --- | --- |
+| `decay_lambda=0`（默认） | 不看时间，与 0.1.0 完全一致 |
+| `decay_lambda=0.05` | 隔 14 天，记住的概率乘 0.50 |
+| `decay_lambda` + `forget=True` | 两种遗忘叠加：`(1-F)·e^{-λΔt}` |
+
+注意 **T（学会的转移）不受时间影响** —— 做题才学得会，时间流逝不会让人突然学会。
+
+实测（250 人 × 10 题，间隔约 4 天，真 λ=0.08）：
+
+| 设置 | 对数似然 | 估出的 L0 / S / G / T |
+| --- | --- | --- |
+| λ=0（当它不存在） | -1698.3 | 0.451 / 0.335 / 0.359 / 0.001 |
+| λ=0.08（用对） | **-1625.2** | 0.663 / 0.110 / 0.194 / 0.162 |
+
+真值 0.60 / 0.10 / 0.20 / 0.15。不带衰减时模型只能把 `T` 压到 0 去「解释」答对率下滑，四个参数全歪；带上之后都回来了。
+
+> ⚠️ 一个要提前知道的坑：小样本下 `L0` 和 `G` **天然分不开**（`L0` 高配 `G` 低，与 `L0` 低配 `G` 高，算出来的首题正确率几乎一样）。40 人 × 9 题这种规模，`L0` 估到 0.59 而真值 0.35 是正常的，不是 bug —— 加到几百人就会收敛。
 
 ---
 
@@ -168,9 +231,13 @@ python -m bkt_em fit examples/answers_sample.csv --cv 5
 python -m bkt_em fit answers.csv --model per-skill --cv 5 \
     --out params.json --mastery mastery.csv --predict pred.csv
 
-# 没有数据？先造一份来验证流程
-python -m bkt_em simulate --users 60 --skills 3 --items 10 --out sim.csv
-python -m bkt_em fit sim.csv --cv 5 --compare
+# 带难度和时间衰减（列名能自动识别，也可以显式指定）
+python -m bkt_em fit answers.csv --decay 0.05 --time-unit ms
+
+# 没有数据？先造一份来验证流程（可带难度与时间间隔）
+python -m bkt_em simulate --users 300 --skills 2 --items 12 \
+    --difficulty-cycle basic,medium,hard --gap-days 3 --decay 0.05 --out sim.csv
+python -m bkt_em fit sim.csv --cv 5 --compare --decay 0.05
 ```
 
 `fit examples/answers_sample.csv --cv 5` 的输出：
@@ -246,24 +313,27 @@ EM 的 M 步全是「发生了的次数 / 有机会发生的次数」，闭式�
 
 ## 已知局限
 
-- **知识点之间不建模先修关系。** 每个知识点单独估一套（除非用 `global`）。要做 DAG 上的
-  推断得另写一层。
-- **不含题目难度/区分度。** 那是 IRT 的活。题意难在 BKT 里会混进 `S` 里（难题答错看着像失误）。
-- **不含作答时间间隔。** 真实遗忘跟「隔了多久」强相关，这里只有开关式的 `F`。
-- **EM 只能保证局部最优。** `n_init` 调大能缓解，代价是慢。
-- **参数可辨识性有边界。** 数据里几乎没人答错时 `S` 估不准，几乎没人答对时 `G` 估不准 ——
-  这不是 bug，是信息不够。
+原来的 5 条里，**难度**和**时间间隔**这两条已在 0.2.0 解决（见上一节）。剩下的 4 条：
+
+- **知识点之间不建模先修关系。** 每个知识点单独估一套（除非用 `global`）。要做 DAG 上的推断
+  得另写一层 —— 那是另一个模型，不是加个参数能解决的。
+- **难度是已知标签，不从数据反推。** 想估每道题的难度与区分度，请上 IRT。
+- **EM 只能保证局部最优。** `n_init` 调大能缓解，代价是慢。另外带难度/时间时 M 步是一阶近似
+  （`1-S·s_t` 没法解析求逆），所以加了「似然守护」：更新后似然不升就退回，保证迭代过程单调不降。
+- **参数可辨识性有边界。** 数据里几乎没人答错时 `S` 估不准，几乎没人答对时 `G` 估不准；
+  小样本下 `L0` 与 `G` 会互相补偿 —— 这不是 bug，是信息不够（Beck & Chang 2007 专门论证过）。
 
 ---
 
 ## API 速查
 
 ```python
-from bkt_em import BKTModel, Params, load_csv, to_sequences, summarize, \
-                   cross_validate, compare_models
+from bkt_em import BKTModel, Params, DIFFICULTY_SCALE, load_csv, to_sequences, \
+                   summarize, cross_validate, compare_models
 from bkt_em.simulate import simulate
 
-BKTModel(model="per-skill", forget=False, n_init=3, min_obs=30, seed=42,
+BKTModel(model="per-skill", forget=False, decay_lambda=0.0,
+         n_init=3, min_obs=30, seed=42,
          tol=1e-6, max_iter=200, bounds=(1e-3, 1-1e-3))
 
 .fit(sequences) -> self
@@ -272,11 +342,15 @@ BKTModel(model="per-skill", forget=False, n_init=3, min_obs=30, seed=42,
 .predict_rows(seqs) -> {原表行号: 概率}
 .mastery(seqs)  -> {"s01/K1": 0.87, ...}     # 作答完后的掌握后验
 .metrics(seqs)  -> {"auc", "accuracy", "logLoss", "rmse", "n"}
-.report(seqs)   -> 上面这些 + AIC/BIC/参数个数/迭代次数
+.report(seqs)   -> 上面这些 + AIC/BIC/参数个数/迭代次数/λ
 .aic(n_obs) / .bic(n_obs)
 
-cross_validate(seqs, k=5, model="per-skill")     # 按学生分折
-compare_models(seqs, k=5)                        # 三种参数化放一起比
+# 数据里的可选列：带上了就自动生效，没带就完全不影响结果
+to_sequences(rows, difficulty_col=None, time_col=None, time_unit="day")
+load_csv("answers.csv", time_col="answered_at", time_unit="ms")
+
+cross_validate(seqs, k=5, model="per-skill", decay_lambda=0.0)   # 按学生分折
+compare_models(seqs, k=5)                                        # 三种参数化放一起比
 ```
 
 ---
@@ -285,22 +359,22 @@ compare_models(seqs, k=5)                        # 三种参数化放一起比
 
 ```
 bkt_em/
-  data.py       长表 → 序列（列名自动识别、行号对齐）
-  em.py         BKTModel：EM 拟合 / 预测 / 掌握度 / 指标 / AIC
+  data.py       长表 → 序列（列名自动识别、行号对齐、难度与时间列）
+  em.py         BKTModel：EM 拟合 / 预测 / 掌握度 / 指标 / AIC / 难度 / 时间衰减
   cv.py         按学生分组的 K 折交叉验证 + 三种参数化对比
-  simulate.py   按已知参数生成作答序列（自测、教学、压测都用它）
+  simulate.py   按已知参数生成作答序列（可带难度与时间间隔）
   cli.py        命令行
 examples/
   quickstart.py          README 里那段的可运行版本
   answers_sample.csv     30 人 × 2 知识点 × 8 题样例数据
-tests/                   48 项 unittest
+tests/                   70 项 unittest
 ```
 
 ---
 
 ## 测试
 
-48 项，全部标准库 `unittest`，不需要 pytest：
+70 项，全部标准库 `unittest`，不需要 pytest：
 
 ```bash
 python -m unittest discover -s tests -v
@@ -310,6 +384,9 @@ python -m unittest discover -s tests -v
 可能路径，把 8 条路径的概率直接加起来，必须等于前向算法算出来的似然。两者不相等，
 说明下标或者缩放写错了。另外还有「EM 迭代过程中似然必须单调不降」这条，用来抓 M 步闭式解
 写错的情况 —— 这两个测试比任何对照实验都能更快定位问题。
+
+`test_advanced.py` 里对难度和时间这两个扩展各验两件事：**行为方向对不对**（难题预测更低、
+隔得越久忘得越多），以及**真的进了模型**（关掉就变回去、开了似然真的更高）。只验第一件容易自欺。
 
 ---
 
