@@ -1,5 +1,10 @@
 # bkt-em
 
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
+[![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-48%20passed-2ea44f)](tests)
+
 **贝叶斯知识追踪（BKT）的 EM 实现，纯 Python 标准库，零第三方依赖。**
 
 四个参数全从数据里估出来，不用拍值：
