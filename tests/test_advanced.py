@@ -43,7 +43,7 @@ class TestDifficulty(unittest.TestCase):
         for label in ("medium", "normal", "中等", "MEDIUM", " Medium "):
             with self.subTest(label=label):
                 self.assertAlmostEqual(_filter([1], p, 0.0, [label], None)[0][0], base, places=12)
-        # 认不出来的标签按「不调整」处理，不报错 —— 不知道的就不该假装知道
+        # 认不出来的标签按「不调整」处理，不报错
         neutral = _filter([1], p, 0.0, None, None)[0][0]
         for label in ("???", "", "very-hard"):
             with self.subTest(label=label):
@@ -184,7 +184,7 @@ class TestParsing(unittest.TestCase):
             _as_days(1.0, "fortnight")
 
     def test_partial_difficulty_is_dropped(self):
-        """一条序列里难度缺一半，就整条当成没有难度 —— 避免下游拿到错位列表。"""
+        """一条序列里难度缺一半，就整条当成没有难度，避免下游拿到错位列表。"""
         rows = [
             {"user_id": "a", "skill_name": "K1", "correct": 1, "order_id": 1, "difficulty": "hard"},
             {"user_id": "a", "skill_name": "K1", "correct": 0, "order_id": 2},

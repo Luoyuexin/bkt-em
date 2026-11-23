@@ -56,7 +56,7 @@ class TestForwardBackward(unittest.TestCase):
         self.assertIsNone(_scan([1, 0], p))
 
     def test_em_likelihood_is_monotone(self):
-        """E 步 M 步反复跑，对数似然必须单调不降 —— 不降就说明闭式解写错了。"""
+        """E 步 M 步反复跑，对数似然必须单调不降，不降就说明闭式解写错了。"""
         seqs = simulate(n_users=40, n_skills=1, n_items=12, seed=3)
         p = Params()
         last = -math.inf

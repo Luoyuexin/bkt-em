@@ -159,7 +159,7 @@ def _cmd_fit(args: argparse.Namespace) -> int:
         print(f"掌握度已写入 {args.mastery}（{len(table)} 行）")
 
     if args.predict:
-        # 用序列自己记的行号回填，不靠猜列名 —— 换过列名的表也能对齐
+        # 用序列自己记的行号回填，换过列名的表也能对齐
         index = {row: (s.user, s.skill, y)
                  for s in seqs for row, y in zip(s.rows, s.y)}
         preds = model.predict_rows(seqs)

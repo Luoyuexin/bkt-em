@@ -74,7 +74,7 @@ class TestCompareModels(unittest.TestCase):
                                 self.rep["global"]["logLikelihood"])
 
     def test_train_likelihood_never_the_judge(self):
-        """per-skill 训练集似然更高，但参数多了 AIC 未必更好 —— 这正是要交叉验证的原因。"""
+        """per-skill 训练集似然更高，但参数多了 AIC 未必更好，这正是要交叉验证的原因。"""
         g = BKTModel(model="global", n_init=1, seed=1).fit(self.seqs)
         ps = BKTModel(model="per-skill", n_init=1, seed=1).fit(self.seqs)
         self.assertGreaterEqual(ps.log_likelihood_, g.log_likelihood_)

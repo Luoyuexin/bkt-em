@@ -1,20 +1,11 @@
 """EM 求解：拿作答序列，反推 L0 / S / G / T（可选 F）。
 
-为什么用 EM 而不是梯度下降
---------------------------
-BKT 的隐状态只有 0/1 两种，是一件非常「干净」的模型：
+隐状态只有 0/1 两种，E 步能精确算出每一步处在「已掌握」的后验概率，
+M 步能写成闭式解（加权计数），不用调学习率。代价是似然面可能有多个局部极大，
+所以默认从几个随机起点各跑一次，取对数似然最高的那组（``n_init`` 控制次数）。
 
-    · E 步能精确算出每一步处在「已掌握」状态的后验概率（前向-后向）
-    · M 步能写成闭式解（就是加权计数），不需要调学习率、不会梯度爆炸
-
-代价是似然面可能有多个局部极大，所以默认从几个随机起点各跑一次，
-取对数似然最高的那组参数（``n_init`` 控制次数，``n_init=1`` 表示只用初始值）。
-
-一个数值细节
-------------
-序列一长，前向概率会连乘到浮点下溢（几十道题就是 1e-40 量级）。
-这里用标准做法：每步除掉一个缩放因子 c_t，最后把 log c_t 加起来就是
-对数似然。既不下溢，算出来的似然还是准的。
+序列一长前向概率会连乘到浮点下溢，用标准做法：每步除掉一个缩放因子 c_t，
+最后把 log c_t 加起来，既不下溢，似然也是准的。
 """
 
 from __future__ import annotations
@@ -30,12 +21,11 @@ from .data import Sequence
 _EPS = 1e-12
 _NEG_INF = float("-inf")
 
-# 题目难度怎么进模型：不是在外层乘一个权重，而是直接改发射概率
-#   S_eff = S × s_scale      难题更容易「会了却答错」
-#   G_eff = G × g_scale      难题更难「不会却蒙对」
-# 三档系数与教学侧的常识一致：基础题蒙对率高、失误率低；难题反过来。
-# 这套数值和项目里 knowledge.py 的 DIFFICULTY_S / DIFFICULTY_G 完全一致，
-# 两边算出来的掌握度才能对得上。
+# 难度直接改发射概率，不在外层乘权重：
+#   S_eff = S × s_scale    难题更容易「会了却答错」
+#   G_eff = G × g_scale    难题更难「不会却蒙对」
+# 数值与项目里 knowledge.py 的 DIFFICULTY_S / DIFFICULTY_G 一致，
+# 两边算出来的掌握度才对得上。
 DIFFICULTY_SCALE: dict[str, tuple[float, float]] = {
     "basic": (0.90, 1.20),
     "easy": (0.90, 1.20),
@@ -52,13 +42,13 @@ _DEFAULT_SCALE = (1.0, 1.0)
 
 @dataclass(frozen=True)
 class Params:
-    """一个知识点（或者一个学生，或者全班）的四/五个参数。
+    """一个知识点（或一个学生、或全班）的四/五个参数。
 
-    L0  初始掌握概率      pristine
-    S   失误率（会了却答错）
-    G   猜测率（不会却蒙对）
-    T   学习转移率（练一次就从不会变成会）
-    F   遗忘率（会了又忘了），默认 0，即标准 BKT
+    L0  初始掌握概率
+    S   失误率，会了却答错
+    G   猜测率，不会却蒙对
+    T   学习转移率，练一次从不会变会
+    F   遗忘率，会了又忘，默认 0 即标准 BKT
     """
 
     L0: float = 0.25
@@ -95,7 +85,7 @@ class Params:
         · λ=0 时退化为 1-F，就是标准 BKT（不遗忘）。
         · F=0 时只剩时间衰减，纯「隔久了会忘」。
         · 两个都开也行：练一次也可能忘，再加上时间越久忘得越多。
-        · T（学会）不受影响 —— 做题才学得会，时间流逝不会让人突然学会。
+        · T（学会）不受影响，做题才学得会。
         """
         keep = 1.0
         if lam > 0.0 and dt_days > 0.0:
@@ -163,7 +153,7 @@ def _scan(y: TSequence[int], p: Params, lam: float = 0.0,
     s_scale, g_scale = _scale_vectors(difficulty, n)
     gaps = _gap_vector(times, n)
     # trans[t] 是「从 t-1 走到 t」的矩阵；trans[0] 用不到
-    # 没有时间列时所有转移矩阵都相同，算一次就够 —— 老用法能省一大截开销
+    # 没有时间列时转移矩阵都一样，算一次就够
     if times and len(times) == n:
         trans = [p.transition(gaps[t], lam) for t in range(n)]
     else:
@@ -259,7 +249,7 @@ def _scan(y: TSequence[int], p: Params, lam: float = 0.0,
 
 def _accumulate(seqs: Iterable[Sequence], p: Params,
                 lam: float = 0.0) -> dict[str, float] | None:
-    """把一组的统计量加起来。``_nseq`` 是成功参与计算的序列条数 —— L0 的分母。"""
+    """把一组的统计量加起来。``_nseq`` 是参与计算的序列条数，也是 L0 的分母。"""
     total: dict[str, float] | None = None
     nseq = 0.0
     for s in seqs:
@@ -347,7 +337,7 @@ def _fit_group(seqs: list[Sequence], init: Params, *, forget: bool, tol: float,
                 probe = _accumulate(seqs, cand, lam)
                 if probe is None or probe["ll"] < ll - 1e-12:
                     break           # 不再上升，就地收敛（p 保持当前值）
-                pending = probe     # 下一轮直接用，别重算 —— 否则开销翻倍
+                pending = probe     # 下一轮直接用，重算会让开销翻倍
             p = cand
             if abs(ll - prev_ll) < tol:
                 break
@@ -553,11 +543,10 @@ class BKTModel:
         return self
 
     def _score_fit(self, sequences: TSequence[Sequence]) -> tuple[float, int]:
-        """按**实际用到**的参数组算总对数似然与参数个数。
+        """按实际用到的参数组算总对数似然与参数个数。
 
-        不能把「pooled 的似然 + 各知识点的似然」加起来 —— 那是两个不同模型的
-        似然相加，加起来既不是 A 也不是 B。这里统一按每条序列最终落到哪组参数
-        去重统计，AIC/BIC 才站得住。
+        不能把 pooled 的似然和各知识点的似然加起来，那是两个不同模型的似然相加。
+        这里按每条序列最终落到哪组参数去重统计，AIC/BIC 才站得住。
         """
         total = 0.0
         used: dict[int, Params] = {}
@@ -592,7 +581,7 @@ class BKTModel:
         return out
 
     def predict_rows(self, sequences: TSequence[Sequence]) -> dict[int, float]:
-        """按「原表行号」对齐的预测结果 —— 直接能跟输入 CSV 拼起来看。"""
+        """按原表行号对齐的预测结果，可以直接跟输入 CSV 拼起来看。"""
         self._check_fitted()
         out: dict[int, float] = {}
         for s in sequences:

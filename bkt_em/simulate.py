@@ -1,17 +1,8 @@
 """模拟数据：已知真值灌进去，看 EM 能不能把真值捞回来。
 
-这是评估「实现到底对不对」最直接的办法 —— 拿真实数据只能看 AUC 高不高，
-但你永远不知道参数该是多少；拿模拟数据就有标准答案：
-
-    真值 L0=0.30 S=0.08 G=0.20 T=0.25
-      ↓ 按模型生成作答序列
-    拟合 → 估出 L0=? S=? G=? T=?
-
-估出来的和真值差得远，那一定是实现有问题（下标错位、gamma/xi 归一不一致
-之类），而不是「数据不好」。
-
-0.2.0 起还能顺带造「带难度」和「带时间间隔」的数据，用来验证这两条扩展
-到底有没有按预期工作。
+拿真实数据只能看 AUC，永远不知道参数该是多少；拿模拟数据有标准答案，
+估偏了就是实现有问题（下标错位、gamma/xi 归一不一致之类），不是数据不好。
+0.2.0 起也能造带难度和带时间间隔的数据。
 """
 
 from __future__ import annotations
@@ -41,7 +32,7 @@ def simulate(n_users: int = 60, n_skills: int = 4, n_items: int = 20, *,
     params                         真值。给 Params 或 dict 都行
     seed                           随机种子，同种子必得同一份数据
     ability_sd                     学生之间初始水平的差异（L0 的标准差）。
-                                   设 0 就是全班一个水平 —— 验证参数恢复时用这个，
+                                   设 0 就是全班一个水平，验证参数恢复时用这个，
                                    因为「每人 L0 不同」本身就不符合 per-skill 模型
     difficulty_cycle               难度标签循环，如 ("basic","medium","hard")。
                                    难度按同一套系数压低蒙对率、抬高失误率
@@ -53,8 +44,8 @@ def simulate(n_users: int = 60, n_skills: int = 4, n_items: int = 20, *,
 
     返回按 (user, skill) 排好序的序列列表，可以直接丢给 ``BKTModel.fit``。
 
-    注意：真值里的 F 与 decay_lambda 会叠加成 ``(1-F)·exp(-λΔt)`` ——
-    生成的「练完就忘」和「隔久了会忘」是同一个式子的两个因子。
+    注意：真值里的 F 与 decay_lambda 会叠加成 ``(1-F)·exp(-λΔt)``，
+    两者是同一个式子的两个因子。
     """
     if n_users < 1 or n_skills < 1 or n_items < 1:
         raise ValueError("n_users / n_skills / n_items 都得是正整数")
@@ -76,8 +67,8 @@ def simulate(n_users: int = 60, n_skills: int = 4, n_items: int = 20, *,
         l0 = min(0.999, max(0.001, l0))
         for k in range(n_skills):
             skill = f"K{k + 1}"
-            # 时间轴只在需要时生成 —— 否则会多消耗随机数，
-            # 让「不带时间」的老用法跑出来的数据和 0.1.0 不一致
+            # 时间轴只在需要时生成，否则会多消耗随机数，
+            # 让不带时间的老用法无法与 0.1.0 复现
             times: list[float] = []
             if gap_days > 0:
                 clock = 0.0

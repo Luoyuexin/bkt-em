@@ -1,10 +1,7 @@
-"""输入解析：把「一行一条作答」的长表切成「一个学生在一个知识点上的作答序列」。
+"""输入解析：把一行一条作答的长表切成一个学生在一个知识点上的作答序列。
 
-BKT 建模的对象是**序列**，不是单条记录。一条记录只说明「这次答对/答错」，
-连续几条才能看出「他是不是越练越对」——而这正是 BKT 要估的东西。
-
-所以这个模块负责一件事：把长表整理成序列，并且**记住每一行在原表里的位置**，
-这样预测结果能按原来的顺序对齐回去，调用方不用自己数行。
+BKT 建模的对象是序列，不是单条记录。这里做两件事：整理成序列，
+并记住每一行在原表里的位置，预测结果才能按原顺序对齐回去。
 """
 
 from __future__ import annotations
@@ -13,7 +10,7 @@ import csv
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence as TSequence
 
-# 列名允许的几种写法 —— 不同人导出的表头叫法不一样，全接住省得来回改名
+# 常见表头写法，全接住，省得调用方来回改名
 _ALIASES = {
     "user": ("user_id", "user", "student_id", "student", "uid", "learner_id"),
     "skill": ("skill_name", "skill", "kc", "knowledge", "knowledge_id", "kcs"),
@@ -127,8 +124,8 @@ def to_sequences(rows: Iterable[Mapping[str, Any]],
     rows 里每行至少要有用户、知识点、对错三样。列名默认按常见写法自动识别，
     也可以用 *_col 参数强制指定。
 
-    排序：给了顺序列就按它排，没给就按原表顺序 —— 因为 BKT 对顺序敏感，
-    顺序错了估出来的 T（学习率）就没有意义。
+    排序：给了顺序列就按它排，否则按原表顺序。BKT 对顺序敏感，
+    顺序错了估出来的 T（学习率）没有意义。
 
     difficulty_col 与 time_col 可选：
       · 给了难度，难题的「蒙对率」会被压低、「失误率」会被抬高
@@ -176,7 +173,7 @@ def to_sequences(rows: Iterable[Mapping[str, Any]],
             skill=skill,
             y=[t[2] for t in items],
             rows=[t[1] for t in items],
-            # 只有整条序列的难度/时间都齐了才带上，缺一半就当没有——
+            # 整条序列的难度/时间都齐了才带上，缺一半就当没有，
             # 免得下游拿到不等长的列表还要自己判断
             difficulty=diffs if all(d is not None for d in diffs) else [],
             time=times if all(v is not None for v in times) else [],
@@ -194,7 +191,7 @@ def load_csv(path: str, **kwargs: Any) -> list[Sequence]:
 
 
 def summarize(sequences: TSequence[Sequence]) -> dict[str, Any]:
-    """数据集概况 —— 拟合前先看一眼，数据不够就别指望估出四个参数。"""
+    """数据集概况。拟合前先看一眼，数据太少估不出四个参数。"""
     users = {s.user for s in sequences}
     skills = {s.skill for s in sequences}
     n_obs = sum(len(s) for s in sequences)
